@@ -110,7 +110,12 @@ func compressCapture(c *ReqRespCapture) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("marshal capture: %w", err)
 	}
-	return zstdEnc.EncodeAll(cborBytes, nil), len(cborBytes), nil
+	compressed := zstdEnc.EncodeAll(cborBytes, nil)
+	// EncodeAll can reserve space based on the uncompressed size. The cache
+	// accounts for len, so retain only the bytes it will actually charge.
+	stored := make([]byte, len(compressed))
+	copy(stored, compressed)
+	return stored, len(cborBytes), nil
 }
 
 // decompressCapture decompresses zstd-compressed CBOR into a ReqRespCapture.

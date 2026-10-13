@@ -10,8 +10,51 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/mostlygeek/llama-swap/internal/cache"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 )
+
+func TestServer_CaptureCacheRetainedCapacity(t *testing.T) {
+	mm := newTestMetricsMonitor(t, logmon.NewWriter(io.Discard), 100, 1)
+	// A compressible body below the encoder window exercises EncodeAll's
+	// allocation based on the uncompressed size.
+	body := bytes.Repeat([]byte("capture body\n"), 20000)
+	var retained int
+	for id := 1; id <= 8; id++ {
+		capture := ReqRespCapture{ID: id, ReqPath: "/v1/chat/completions", ReqBody: body, RespBody: body}
+		if !mm.addCapture(capture) {
+			t.Fatal("addCapture returned false")
+		}
+		stored, err := mm.captureCache.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cap(stored) != len(stored) {
+			t.Fatalf("capture %d: retained capacity=%d, accounted bytes=%d", id, cap(stored), len(stored))
+		}
+		retained += cap(stored)
+		got := mm.getCaptureByID(id)
+		if got == nil || got.ID != id || got.ReqPath != capture.ReqPath || !bytes.Equal(got.ReqBody, body) || !bytes.Equal(got.RespBody, body) {
+			t.Fatal("stored capture roundtrip mismatch")
+		}
+	}
+	if got := mm.captureCache.Size(); got != retained {
+		t.Fatalf("cache size=%d, retained capacity=%d", got, retained)
+	}
+	t.Logf("cache size and retained capacity: %d bytes", retained)
+	// The same slices must obey a cache budget of exactly one capture.
+	stored, _ := mm.captureCache.Get(1)
+	bounded := cache.New(len(stored))
+	if err := bounded.Add(1, stored); err != nil {
+		t.Fatal(err)
+	}
+	if err := bounded.Add(2, stored); err != nil {
+		t.Fatal(err)
+	}
+	if bounded.Has(1) || !bounded.Has(2) || bounded.Size() != cap(stored) {
+		t.Fatal("capture cache did not enforce retained-byte budget")
+	}
+}
 
 func TestServer_CaptureCompressRoundtrip(t *testing.T) {
 	orig := &ReqRespCapture{
